@@ -13,15 +13,16 @@
 class Unit
 {
 private:
-    uint16_t id;
+    uint64_t id;
     uint16_t range;
     uint8_t speed;
     Coord cur_pos;
 
 public:
-    Unit(uint16_t range, uint8_t speed, Coord cur_pos) : id((uint16_t)time(NULL)), range(range), speed(speed), cur_pos(cur_pos) {}
+    Unit(uint16_t range, uint8_t speed, Coord cur_pos);
+    const uint64_t &get_id() const;
     void print() const;
-    std::expected<MoveRequest, std::string> make_movement(Coord to);
+    std::expected<MoveRequest, std::string> build_movement_request(Coord to) const;
 };
 
 #endif
