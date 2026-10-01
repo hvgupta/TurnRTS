@@ -1,8 +1,8 @@
 #include <iostream>
 #include <vector>
 
-#include <unit.hpp>
-#include <move.hpp>
+#include "unit.hpp"
+#include "move.hpp"
 
 
 std::vector<Unit> get_units(){
@@ -16,4 +16,13 @@ std::vector<Unit> get_units(){
 
 int main(){
     std::vector<Unit> units = get_units();
+
+    for (int i = 0; i < units.size(); i++){
+        units[i].print();
+    }
+
+    std::expected<MoveRequest, std::string> result =  units[0].make_movement({5,5});
+    if (!result.has_value()){
+        std::cout << result.error() << "\n";
+    }
 }

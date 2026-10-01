@@ -1,7 +1,7 @@
 #ifndef _MOVE
 #define _MOVE 1
 
-#pragma GCC system_header
+#pragma once
 
 #include <stdint.h>
 
