@@ -23,7 +23,7 @@ std::vector<MoveRequest> simple_conflict_resolve(std::vector<MoveRequest>mrl){
     for (const MoveRequest &mr: mrl){
         if (coord_tracker.find(mr.to) == coord_tracker.end() || coord_tracker[mr.to][0].time == mr.time){
             coord_tracker[mr.to].push_back(mr);
-        } else {
+        } else if (coord_tracker[mr.to][0].time > mr.time) {
             coord_tracker[mr.to] = {mr};
         }
     }
