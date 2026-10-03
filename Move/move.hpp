@@ -41,4 +41,6 @@ struct MoveRequest {
     }
 };
 
+Coord one_step_back(Coord from, Coord to);
+
 #endif
