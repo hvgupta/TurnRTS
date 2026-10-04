@@ -25,7 +25,7 @@ class State
         std::queue<MoveRequest> mrq,
         std::set<uint64_t> moving_units) const;
 
-    void run_one_generation(std::queue<MoveRequest> &mrq, std::set<uint64_t> &moving_units, std::unordered_map<uint64_t, MoveRequest> &cached_requests, std::unordered_map<Coord, std::vector<MoveRequest>> &coord_tracker, std::unordered_map<uint64_t, uint64_t> &dependency_graph, std::queue<MoveRequest> &next_pass_mrq, bool &state_changed) const;
+    void run_one_generation(std::queue<MoveRequest> &mrq, std::set<uint64_t> &moving_units, std::unordered_map<uint64_t, MoveRequest> &cached_requests, std::unordered_map<Coord, MoveRequest> &coord_tracker, std::unordered_map<uint64_t, uint64_t> &dependency_graph, std::queue<MoveRequest> &next_pass_mrq, bool &state_changed) const;
 
 public:
     void add_unit(Unit &&unit);

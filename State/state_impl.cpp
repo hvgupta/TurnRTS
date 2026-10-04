@@ -1,8 +1,25 @@
 #include "state.hpp"
 
-#include <set>
 #include <algorithm>
+#include <random>
+#include <set>
 #include <unordered_set>
+
+// Debug logging is compiled out unless CONFLICT_DEBUG is defined.
+#ifdef CONFLICT_DEBUG
+#define CR_LOG(x) (std::cout << x)
+#else
+#define CR_LOG(x) ((void)0)
+#endif
+
+namespace {
+constexpr int kMaxGenerations = 1000; // safety cap against endless bouncing
+
+std::mt19937_64 &conflict_rng() {
+  static std::mt19937_64 rng{std::random_device{}()};
+  return rng;
+}
+} // namespace
 
 void State::push_step_back_request(std::queue<MoveRequest> &mrq,
                                    const uint64_t &unit_id,
@@ -28,240 +45,245 @@ void State::add_unit(uint16_t range, uint8_t speed, Coord cur_pos) {
   add_unit(Unit(range, speed, cur_pos));
 }
 
-std::vector<MoveRequest>
-State::simple_conflict_resolve(std::vector<MoveRequest> mrl) const {
-  std::set<uint64_t> moving_units;
-  std::queue<MoveRequest> mrq;
-  for (const MoveRequest &mr : mrl) {
-    moving_units.insert(mr.unit_id);
-    mrq.push(mr);
-  }
-  return simple_conflict_resolve(mrq, moving_units);
-}
-
+// Each generation re-evaluates ONE request per unit. Accepted requests are
+// carried into the next generation, evicted ones are replaced by their
+// step-back request, so the queue always holds exactly one request per unit.
+// The loop ends when a generation changes nothing.
 std::vector<MoveRequest>
 State::simple_conflict_resolve(std::queue<MoveRequest> initial_mrq,
                                std::set<uint64_t> initial_moving_units) const {
-  // Tracks the finalized, stabilized cell layout across generations
-  std::unordered_map<Coord, std::vector<MoveRequest>> stabilized_tracker;
+  std::queue<MoveRequest> mrq = std::move(initial_mrq);
+  std::set<uint64_t> moving_units = std::move(initial_moving_units);
 
-  std::queue<MoveRequest> mrq = initial_mrq;
-  std::set<uint64_t> moving_units = initial_moving_units;
-
-  bool state_changed = true;
-
-  // MACRO LOOP: Resolves cascading fallbacks and new dynamic conflicts
-  // generationally
-  while (state_changed) {
-    state_changed = false;
-
-    // Clear intermediate tracking layers for this pass
-    std::unordered_map<Coord, std::vector<MoveRequest>> coord_tracker;
-    std::unordered_map<uint64_t, uint64_t> dependency_graph;
+  for (int gen = 0; gen < kMaxGenerations; ++gen) {
+    std::unordered_map<Coord, MoveRequest> coord_tracker;
+    std::unordered_map<uint64_t, uint64_t>
+        dependency_graph; // waiter -> blocker
     std::unordered_map<uint64_t, MoveRequest> cached_requests;
-
-    // Collects fallback requests to process in the NEXT generation
     std::queue<MoveRequest> next_pass_mrq;
+    bool state_changed = false;
 
     run_one_generation(mrq, moving_units, cached_requests, coord_tracker,
                        dependency_graph, next_pass_mrq, state_changed);
 
-    // Pass down the generated fallback queue for the next generational loop
-    // pass
+    if (!state_changed) {
+      std::vector<MoveRequest> ans;
+      for (const auto &c : coord_tracker) {
+        ans.push_back(c.second);
+      }
+      return ans;
+    }
+
+    // Carry accepted requests forward so they are re-validated next pass.
+    for (const auto &c : coord_tracker) {
+      next_pass_mrq.push(c.second);
+    }
     mrq = std::move(next_pass_mrq);
-
-    // Stash stabilized grid results from this pass
-    stabilized_tracker = std::move(coord_tracker);
   }
 
-  // ====================================================================
-  // PHASE 4: FLATTEN STABILIZED POSITION DATA
-  // ====================================================================
-  std::vector<MoveRequest> ans;
-  for (const auto &c : stabilized_tracker) {
-    ans.insert(ans.end(), c.second.begin(), c.second.end());
-  }
-
-  return ans;
+  throw std::runtime_error("simple_conflict_resolve: did not converge");
 }
 
 void State::run_one_generation(
     std::queue<MoveRequest> &mrq, std::set<uint64_t> &moving_units,
     std::unordered_map<uint64_t, MoveRequest> &cached_requests,
-    std::unordered_map<Coord, std::vector<MoveRequest>> &coord_tracker,
+    std::unordered_map<Coord, MoveRequest> &coord_tracker,
     std::unordered_map<uint64_t, uint64_t> &dependency_graph,
     std::queue<MoveRequest> &next_pass_mrq, bool &state_changed) const {
-  // ====================================================================
-  // PHASE 1: ARBITRATE SPOT CLASHES & MAP INTENDED MOVEMENT GRAPH
-  // ====================================================================
+
+  // ---------------------------------------------------------------- phase 1
+  // Classify every request.
+  std::unordered_map<Coord, int> tie_count;
   while (!mrq.empty()) {
     const MoveRequest mr = mrq.front();
     mrq.pop();
 
-    // If the target tile contains an entity in the original grid state
-    if (coord_inverse_map.find(mr.to) != coord_inverse_map.end()) {
-      const uint64_t &unit_id = coord_inverse_map.at(mr.to);
+    // Target tile is occupied in the original grid.
+    // auto occ = coord_inverse_map.find(mr.to);
+    if (coord_inverse_map.contains(mr.to)) {
+      const uint64_t blocker_id = coord_inverse_map.at(mr.to);
 
-      // Stationary check: Heading to its own current starting location
-      if (unit_id == mr.unit_id) {
-        moving_units.erase(unit_id);
-        cached_requests.erase(unit_id);
-        coord_tracker[mr.to].push_back(mr);
-        continue;
-      }
-
-      // Dependency check: The blocking unit is actively trying to move
-      if (moving_units.find(unit_id) != moving_units.end()) {
-        dependency_graph[mr.unit_id] = unit_id;
+      if (blocker_id == mr.unit_id) {
+        // Stationary: unit stays where it is.
+        moving_units.erase(blocker_id);
+        cached_requests.erase(blocker_id);
+        dependency_graph.erase(blocker_id);
+        coord_tracker[mr.to] = mr;
+      } else if (moving_units.contains(blocker_id)) {
+        // Might vacate the tile; decide in phase 2.
+        dependency_graph[mr.unit_id] = blocker_id;
         cached_requests[mr.unit_id] = mr;
+      } else {
+        // Blocker is stationary: cannot enter.
+        push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
+        state_changed = true;
+      }
+      continue;
+    }
+
+    // Free tile: earliest arrival wins, ties broken by lowest unit id.
+    // coord_tracker[to] therefore holds at most one request for free tiles.
+    if (!coord_tracker.contains(mr.to)) {
+      coord_tracker[mr.to] = mr;
+      continue;
+    }
+
+    const MoveRequest cur = coord_tracker.at(mr.to);
+    bool mr_wins;
+    if (mr.time < cur.time) {
+      mr_wins = true;
+      tie_count[mr.to] = 1; // new earliest time: restart the lottery
+    } else if (mr.time == cur.time) {
+      const int n = ++tie_count[mr.to];
+      mr_wins = std::uniform_int_distribution<int>(1, n)(conflict_rng()) == 1;
+    } else {
+      mr_wins = false;
+    }
+
+    CR_LOG(mr.unit_id << (mr_wins ? " displaces " : " loses to ") << cur.unit_id
+                      << "\n");
+
+    if (mr_wins) {
+      push_step_back_request(next_pass_mrq, cur.unit_id, cur.to);
+      coord_tracker[mr.to] = {mr};
+    } else {
+      push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
+    }
+    state_changed = true;
+  }
+
+  // ---------------------------------------------------------------- phase 2
+  // Resolve requests that target a tile currently occupied by a moving unit.
+  // Blockers are evaluated before the units waiting on them.
+
+  // Units that hold an accepted request right now.
+  std::unordered_set<uint64_t> accepted;
+  for (const auto &c : coord_tracker) {
+    accepted.insert(c.second.unit_id);
+  }
+
+  // Reverse graph: blocker -> units waiting on it.
+  std::unordered_map<uint64_t, std::vector<uint64_t>> waiters;
+  for (const auto &[uid, _] : cached_requests) {
+    waiters[dependency_graph.at(uid)].push_back(uid);
+  }
+
+  std::unordered_set<uint64_t> handled; // accepted or evicted in phase 2
+  std::queue<uint64_t> ready;
+
+  // Accept a cached request and release the units waiting behind it.
+  auto accept = [&](uint64_t uid) {
+    const MoveRequest &mr = cached_requests.at(uid);
+    coord_tracker[mr.to] = mr;
+    accepted.insert(uid);
+    handled.insert(uid);
+    if (!waiters.contains(uid)) {
+      return;
+    }
+    for (const uint64_t &wuid : waiters.at(uid)) {
+      ready.push(wuid);
+    }
+  };
+
+  // Evict a cached request. Everything queued behind it is blocked too,
+  // because the evicted unit still occupies its tile.
+  auto evict_cascade = [&](uint64_t root) {
+    std::vector<uint64_t> stack{root};
+    while (!stack.empty()) {
+      uint64_t uid = stack.back();
+      stack.pop_back();
+      if (!handled.insert(uid).second) {
         continue;
       }
-
-      // Hard block check: The blocking unit is permanently stationary
+      const MoveRequest &mr = cached_requests.at(uid);
       push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
       state_changed = true;
-      continue;
-    }
-
-    // Standard spatial-temporal prioritization for unblocked spaces
-    if (coord_tracker.find(mr.to) == coord_tracker.end() ||
-        coord_tracker[mr.to][0].time == mr.time) {
-      coord_tracker[mr.to].push_back(mr);
-    } else if (coord_tracker[mr.to][0].time > mr.time) {
-      std::cout << mr.unit_id
-                << " removes the following due to early arrival\n";
-      int n = coord_tracker[mr.to].size();
-      for (int i = 0; i < n; i++) {
-        const MoveRequest &cur_req = coord_tracker[mr.to][i];
-        std::cout << "\t " << cur_req.unit_id << "\n";
-        push_step_back_request(next_pass_mrq, cur_req.unit_id, cur_req.to);
+      if (!waiters.contains(uid)){
+        continue;
       }
-      coord_tracker[mr.to] = {mr};
-      state_changed = true;
-    } else {
-      std::cout << "going one step back for late unit " << mr.unit_id << "\n";
-      push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
-      state_changed = true;
-    }
-  }
-
-  // ====================================================================
-  // PHASE 2: TOPOLOGICAL TRAVERSAL (The Sequential Train Effect)
-  // ====================================================================
-  std::unordered_map<uint64_t, int> in_degree;
-  for (const auto &pair : dependency_graph) {
-    in_degree[pair.second]++;
-  }
-
-  // Collect free ends (units with no other moving entities behind them)
-  std::queue<uint64_t> leaf_nodes;
-  for (const auto &pair : cached_requests) {
-    if (in_degree[pair.first] == 0) {
-      leaf_nodes.push(pair.first);
-    }
-  }
-
-  std::unordered_set<uint64_t> resolved_dependents;
-
-  while (!leaf_nodes.empty()) {
-    uint64_t uid = leaf_nodes.front();
-    leaf_nodes.pop();
-
-    if (cached_requests.find(uid) == cached_requests.end())
-      continue;
-    const MoveRequest &mr = cached_requests.at(uid);
-
-    // If the blocking vehicle safely vacated the cell, this unit slides forward
-    if (coord_tracker.find(mr.to) == coord_tracker.end()) {
-      coord_tracker[mr.to].push_back(mr);
-      resolved_dependents.insert(uid);
-
-      // De-escalate blocking restrictions backward down the train line
-      if (dependency_graph.find(uid) != dependency_graph.end()) {
-        uint64_t blocker_id = dependency_graph.at(uid);
-        in_degree[blocker_id]--;
-        if (in_degree[blocker_id] == 0) {
-          leaf_nodes.push(blocker_id);
-        }
+      for (const uint64_t &x: waiters.at(uid)){
+        stack.push_back(x);
       }
-    } else {
-      // Space became locked or blocked permanently. Evict to fallback queue.
-      push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
-      state_changed = true;
     }
-  }
+  };
 
-  // ====================================================================
-  // PHASE 3: CLOSED-LOOP CYCLE TRACING (Roundabout Arbitration)
-  // ====================================================================
-  for (const auto &pair : cached_requests) {
-    uint64_t start_uid = pair.first;
-    if (resolved_dependents.find(start_uid) != resolved_dependents.end())
-      continue;
-
-    // Follow the single out-dependency chain to discover cyclic tracks
-    std::unordered_set<uint64_t> visited_in_chain;
-    std::vector<uint64_t> current_chain;
-
-    uint64_t current_uid = start_uid;
-    bool is_cycle = false;
-
-    while (true) {
-      if (resolved_dependents.find(current_uid) != resolved_dependents.end())
-        break;
-      if (cached_requests.find(current_uid) == cached_requests.end())
-        break;
-
-      if (visited_in_chain.find(current_uid) != visited_in_chain.end()) {
-        auto it =
-            std::find(current_chain.begin(), current_chain.end(), current_uid);
-        if (it != current_chain.end()) {
-          current_chain.erase(current_chain.begin(), it);
-          is_cycle = true;
-        }
-        break;
-      }
-
-      visited_in_chain.insert(current_uid);
-      current_chain.push_back(current_uid);
-
-      if (dependency_graph.find(current_uid) != dependency_graph.end()) {
-        current_uid = dependency_graph.at(current_uid);
+  // Evaluate ready units: blocker must have an accepted move AND the target
+  // tile must not have been claimed by someone else.
+  auto drain = [&]() {
+    while (!ready.empty()) {
+      uint64_t uid = ready.front();
+      ready.pop();
+      if (handled.count(uid))
+        continue;
+      const MoveRequest &mr = cached_requests.at(uid);
+      const uint64_t blocker = dependency_graph.at(uid);
+      const bool blocker_left = accepted.count(blocker) > 0;
+      if (blocker_left && coord_tracker.find(mr.to) == coord_tracker.end()) {
+        accept(uid);
       } else {
-        break; // Chain collided into a stationary object or wall
+        evict_cascade(uid);
       }
     }
+  };
 
-    if (is_cycle) {
-      std::cout << "Synchronous loop verified! Executing concurrent shift for "
-                   "units: ";
-      for (uint64_t cycle_uid : current_chain) {
-        std::cout << cycle_uid << " ";
-      }
-      std::cout << "\n";
+  // Heads: blocker is not itself a pending cached request, so its fate is
+  // already decided (accepted, stationary, or evicted in phase 1).
+  for (const auto &[uid, _] : cached_requests) {
+    if (!cached_requests.count(dependency_graph.at(uid))) {
+      ready.push(uid);
+    }
+  }
+  drain();
 
-      // Allow every component of the circular track to shift forward at once
-      for (uint64_t cycle_uid : current_chain) {
-        const MoveRequest &cycle_mr = cached_requests.at(cycle_uid);
-        coord_tracker[cycle_mr.to].push_back(cycle_mr);
-        resolved_dependents.insert(cycle_uid);
-      }
+  // ---------------------------------------------------------------- phase 3
+  // Whatever is still unhandled is a cycle or a tail hanging off a cycle.
+  for (const auto &[start, _] : cached_requests) {
+    if (handled.count(start))
       continue;
+
+    // Walk the single out-edge chain until it repeats.
+    std::unordered_map<uint64_t, size_t> pos;
+    std::vector<uint64_t> path;
+    uint64_t cur = start;
+    while (!handled.count(cur) && cached_requests.count(cur) &&
+           !pos.count(cur)) {
+      pos[cur] = path.size();
+      path.push_back(cur);
+      cur = dependency_graph.at(cur);
     }
 
-    // Broken dependency chain or dead-end: Unit must issue a step-back request
-    const MoveRequest &mr = pair.second;
-    push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
-    state_changed = true;
+    if (pos.count(cur) && !handled.count(cur)) {
+      std::vector<uint64_t> cycle(path.begin() + pos[cur], path.end());
+
+      // A 2-cycle is a swap (units pass through each other): disallow.
+      bool ok = cycle.size() > 2;
+      for (uint64_t id : cycle) {
+        if (coord_tracker.count(cached_requests.at(id).to))
+          ok = false;
+      }
+
+      if (ok) {
+        CR_LOG("Synchronous loop, shifting " << cycle.size() << " units\n");
+        for (uint64_t id : cycle)
+          accept(id);
+        drain(); // releases tails hanging off the cycle
+      } else {
+        evict_cascade(cycle.front()); // also evicts all tails
+      }
+    }
+
+    // Safety net: nothing should remain unhandled, but never drop a unit.
+    if (!handled.count(start)) {
+      evict_cascade(start);
+    }
   }
 }
 
-
 const std::vector<Unit> &State::get_units() const {
   std::vector<Unit> units;
-  for (const auto &p: unit_map){
+  for (const auto &p : unit_map) {
     units.push_back(p.second);
-  } 
+  }
 
   return units;
 }
