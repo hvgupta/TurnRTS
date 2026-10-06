@@ -49,6 +49,18 @@ void State::add_unit(uint16_t range, uint8_t speed, Coord cur_pos) {
 // carried into the next generation, evicted ones are replaced by their
 // step-back request, so the queue always holds exactly one request per unit.
 // The loop ends when a generation changes nothing.
+
+std::vector<MoveRequest>
+State::simple_conflict_resolve(std::vector<MoveRequest> mrl) const {
+  std::set<uint64_t> moving_units;
+  std::queue<MoveRequest> mrq;
+  for (const MoveRequest &mr : mrl) {
+    moving_units.insert(mr.unit_id);
+    mrq.push(mr);
+  }
+  return simple_conflict_resolve(mrq, moving_units);
+}
+
 std::vector<MoveRequest>
 State::simple_conflict_resolve(std::queue<MoveRequest> initial_mrq,
                                std::set<uint64_t> initial_moving_units) const {
@@ -61,10 +73,9 @@ State::simple_conflict_resolve(std::queue<MoveRequest> initial_mrq,
         dependency_graph; // waiter -> blocker
     std::unordered_map<uint64_t, MoveRequest> cached_requests;
     std::queue<MoveRequest> next_pass_mrq;
-    bool state_changed = false;
-
-    run_one_generation(mrq, moving_units, cached_requests, coord_tracker,
-                       dependency_graph, next_pass_mrq, state_changed);
+    bool state_changed =
+        run_one_generation(mrq, moving_units, cached_requests, coord_tracker,
+                           dependency_graph, next_pass_mrq);
 
     if (!state_changed) {
       std::vector<MoveRequest> ans;
@@ -84,15 +95,16 @@ State::simple_conflict_resolve(std::queue<MoveRequest> initial_mrq,
   throw std::runtime_error("simple_conflict_resolve: did not converge");
 }
 
-void State::run_one_generation(
+bool State::run_one_generation(
     std::queue<MoveRequest> &mrq, std::set<uint64_t> &moving_units,
     std::unordered_map<uint64_t, MoveRequest> &cached_requests,
     std::unordered_map<Coord, MoveRequest> &coord_tracker,
     std::unordered_map<uint64_t, uint64_t> &dependency_graph,
-    std::queue<MoveRequest> &next_pass_mrq, bool &state_changed) const {
+    std::queue<MoveRequest> &next_pass_mrq) const {
 
   // ---------------------------------------------------------------- phase 1
   // Classify every request.
+  bool state_changed = false;
   std::unordered_map<Coord, int> tie_count;
   while (!mrq.empty()) {
     const MoveRequest mr = mrq.front();
@@ -198,10 +210,10 @@ void State::run_one_generation(
       const MoveRequest &mr = cached_requests.at(uid);
       push_step_back_request(next_pass_mrq, mr.unit_id, mr.to);
       state_changed = true;
-      if (!waiters.contains(uid)){
+      if (!waiters.contains(uid)) {
         continue;
       }
-      for (const uint64_t &x: waiters.at(uid)){
+      for (const uint64_t &x : waiters.at(uid)) {
         stack.push_back(x);
       }
     }
@@ -229,17 +241,19 @@ void State::run_one_generation(
   // Heads: blocker is not itself a pending cached request, so its fate is
   // already decided (accepted, stationary, or evicted in phase 1).
   for (const auto &[uid, _] : cached_requests) {
-    if (!cached_requests.count(dependency_graph.at(uid))) {
-      ready.push(uid);
+    if (cached_requests.contains(dependency_graph.at(uid))) {
+      continue;
     }
+    ready.push(uid);
   }
   drain();
 
   // ---------------------------------------------------------------- phase 3
   // Whatever is still unhandled is a cycle or a tail hanging off a cycle.
   for (const auto &[start, _] : cached_requests) {
-    if (handled.count(start))
+    if (handled.count(start)) {
       continue;
+    }
 
     // Walk the single out-edge chain until it repeats.
     std::unordered_map<uint64_t, size_t> pos;
@@ -277,9 +291,11 @@ void State::run_one_generation(
       evict_cascade(start);
     }
   }
+
+  return state_changed;
 }
 
-const std::vector<Unit> &State::get_units() const {
+const std::vector<Unit> State::get_units() const {
   std::vector<Unit> units;
   for (const auto &p : unit_map) {
     units.push_back(p.second);
@@ -287,3 +303,5 @@ const std::vector<Unit> &State::get_units() const {
 
   return units;
 }
+
+void set_conflict_seed(uint64_t seed) { conflict_rng().seed(seed); }
