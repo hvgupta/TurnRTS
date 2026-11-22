@@ -8,13 +8,13 @@ Coord one_step_back(Coord from, Coord to){
     int dx = to.x - from.x;
     int dy = to.y - from.y;
 
-    auto step_calculator = [](int dom_da, int dom_axis_val, int other_da, int other_val){
+    auto step_calculator = [](int dom_da, int to_dom_axis_val, int other_da, int to_other_axis_val){
         int step_a = (dom_da > 0) ? 1 : -1;
-        int prev_a = dom_axis_val-step_a;
+        int prev_a = to_dom_axis_val-step_a;
 
-        int num = other_da * (prev_a - dom_axis_val);
-        int adjustment = ((num * dom_axis_val > 0) ? 1:-1)*std::abs(dom_da)/2;
-        int prev_other = other_val + (num+adjustment)/dom_da;
+        int num = other_da * (prev_a - to_dom_axis_val);
+        int adjustment = ((num * to_dom_axis_val > 0) ? 1:-1)*std::abs(dom_da)/2;
+        int prev_other = to_other_axis_val + (num+adjustment)/dom_da;
 
         return std::pair<int,int>(prev_a, prev_other);
     };
