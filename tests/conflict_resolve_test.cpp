@@ -43,7 +43,7 @@ Built build(const Starts &starts) {
 std::vector<MoveRequest> resolve(const Starts &starts,
                                  const std::vector<MoveRequest> &reqs) {
   Built b = build(starts);
-  auto out = b.state.simple_conflict_resolve(reqs);
+  auto out = b.state.evaluate(reqs);
   for (auto &o : out)
     o.unit_id = b.to_logical.at(o.unit_id);
   return out;

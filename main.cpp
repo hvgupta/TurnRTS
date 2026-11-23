@@ -20,6 +20,7 @@ std::vector<Coord> units_destination() {
 }
 
 int main() {
+  set_conflict_seed(43);
   State state;
   add_units(state);
   std::vector<Coord> dests = units_destination();
@@ -40,7 +41,7 @@ int main() {
   }
   std::cout << "\n\n";
 
-  std::vector<MoveRequest> mr_out = state.simple_conflict_resolve(mrl);
+  std::vector<MoveRequest> mr_out = state.evaluate(mrl);
   for (const auto &mro : mr_out) {
     mro.print();
     std::cout << "\n";
