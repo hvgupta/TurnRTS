@@ -14,6 +14,7 @@ add_library(core STATIC
     Unit/unit_impl.cpp
     Move/move_helper.cpp
     State/state_impl.cpp
+    State/state_turn_impl.cpp
 )
 
 target_include_directories(core
