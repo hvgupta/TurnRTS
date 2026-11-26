@@ -31,7 +31,9 @@ class State {
         const State &s, std::unordered_set<uint64_t> moving_units);
     void manage_conflict(const State &s, MoveRequest &mr, bool same_time);
     void release_non_circular_dependency(const State &s);
-    void release_circular_dependency(const State &s);
+    void release_circular_dependency();
+
+    void resolve_simple_cycle(const std::vector<uint64_t> &simple_cycle_units);
 
   public:
     Turn(std::vector<MoveRequest> &&_mrl);
