@@ -1,10 +1,5 @@
 #include "state.hpp"
 
-
-std::vector<MoveRequest> State::Turn::get_accepted_requests() const {
-  return this->accepted_requests;
-}
-
 const std::vector<Unit> State::get_units() const {
   std::vector<Unit> units;
   for (const auto &p : unit_map) {

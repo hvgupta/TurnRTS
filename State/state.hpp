@@ -18,16 +18,17 @@ class State {
   class Turn {
   private:
     std::vector<MoveRequest> mrl;
-    std::vector<MoveRequest> accepted_requests;
-    
-    std::unordered_set<uint64_t> moving_units;
+
     std::unordered_map<uint64_t, uint64_t> dependency_graph;
     std::unordered_map<uint64_t, MoveRequest> unit_to_move_map;
+
     std::unordered_map<Coord, MoveRequest> will_be_occupied;
+    std::unordered_set<uint64_t> accepted_units;
 
     void mrl_push(const MoveRequest &mr);
 
-    void non_dependency_and_circular_eval(const State &s);
+    void non_dependency_and_circular_eval(
+        const State &s, std::unordered_set<uint64_t> moving_units);
     void manage_conflict(const State &s, MoveRequest &mr, bool same_time);
     void release_non_circular_dependency(const State &s);
     void release_circular_dependency(const State &s);
@@ -35,9 +36,8 @@ class State {
   public:
     Turn(std::vector<MoveRequest> &&_mrl);
     void add_dependency(const uint64_t &mover, const MoveRequest &waiter);
-    void evaluate(const State &s);
+    std::vector<MoveRequest> evaluate(const State &s);
     void take_one_step_back(const State &s, const MoveRequest &mr);
-    std::vector<MoveRequest> get_accepted_requests() const;
   };
 
 public:
